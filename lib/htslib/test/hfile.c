@@ -180,6 +180,8 @@ int main(void)
         text = slurp(buffer);
         if (strcmp(original, text) != 0) {
             fprintf(stderr, "%s differs from vcf.c\n", buffer);
+            free(text);
+            free(original);
             return EXIT_FAILURE;
         }
         free(text);
@@ -252,10 +254,10 @@ int main(void)
     if (strcmp(buffer, "hello, world!\x0A") != 0) fail("hread result");
     if (hclose(fin) != 0) fail("hclose(\"data:...\")");
 
-    fin = hopen("test/xx#blank.sam", "r");
-    if (fin == NULL) fail("hopen(\"test/xx#blank.sam\") for reading");
-    if (hread(fin, buffer, 100) != 0) fail("test/xx#blank.sam is non-empty");
-    if (hclose(fin) != 0) fail("hclose(\"test/xx#blank.sam\") for reading");
+    fin = hopen("test/emptyfile", "r");
+    if (fin == NULL) fail("hopen(\"test/emptyfile\") for reading");
+    if (hread(fin, buffer, 100) != 0) fail("test/emptyfile is non-empty");
+    if (hclose(fin) != 0) fail("hclose(\"test/emptyfile\") for reading");
 
     fin = hopen("data:,", "r");
     if (fin == NULL) fail("hopen(\"data:\") for reading");

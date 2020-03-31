@@ -2,7 +2,7 @@
 
    Copyright (c) 2008 Broad Institute / Massachusetts Institute of Technology
                  2011, 2012 Attractive Chaos <attractor@live.co.uk>
-   Copyright (C) 2009, 2013-2017 Genome Research Ltd
+   Copyright (C) 2009, 2013-2019 Genome Research Ltd
 
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
@@ -23,6 +23,7 @@
    THE SOFTWARE.
 */
 
+#define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
 #include <config.h>
 
 #include <stdio.h>
@@ -34,6 +35,7 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <inttypes.h>
+#include <zlib.h>
 
 #ifdef HAVE_LIBDEFLATE
 #include <libdeflate.h>
@@ -45,6 +47,7 @@
 #include "htslib/thread_pool.h"
 #include "htslib/hts_endian.h"
 #include "cram/pooled_alloc.h"
+#include "hts_internal.h"
 
 #define BGZF_CACHE
 #define BGZF_MT
@@ -101,14 +104,17 @@ typedef struct bgzf_job {
 enum mtaux_cmd {
     NONE = 0,
     SEEK,
+    SEEK_DONE,
     HAS_EOF,
+    HAS_EOF_DONE,
     CLOSE,
 };
 
 // When multi-threaded bgzf_tell won't work, so we delay the hts_idx_push
 // until we've written the last block.
 typedef struct {
-    int tid, beg, end, is_mapped;  // args for hts_idx_push
+    hts_pos_t beg, end;
+    int tid, is_mapped;  // args for hts_idx_push
     uint64_t offset, block_number;
 } hts_idx_cache_entry;
 
@@ -181,12 +187,16 @@ struct __bgzidx_t
  * Returns 0 on success,
  *        -1 on failure
  */
-int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, int beg, int end, uint64_t offset, int is_mapped) {
+int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, hts_pos_t beg, hts_pos_t end, uint64_t offset, int is_mapped) {
     hts_idx_cache_entry *e;
     mtaux_t *mt = fp->mt;
 
     if (!mt)
         return hts_idx_push(hidx, tid, beg, end, offset, is_mapped);
+
+    // Early check for out of range positions which would fail in hts_idx_push()
+    if (hts_idx_check_range(hidx, tid, beg, end) < 0)
+        return -1;
 
     pthread_mutex_lock(&mt->idx_m);
 
@@ -214,6 +224,40 @@ int bgzf_idx_push(BGZF *fp, hts_idx_t *hidx, int tid, int beg, int end, uint64_t
     pthread_mutex_unlock(&mt->idx_m);
 
     return 0;
+}
+
+/*
+ * bgzf analogue to hts_idx_amend_last.
+ *
+ * This is needed when multi-threading and writing indices on the fly.
+ * At the point of writing a record we know the virtual offset for start
+ * and end, but that end virtual offset may be the end of the current
+ * block.  In standard indexing our end virtual offset becomes the start
+ * of the next block.  Thus to ensure bit for bit compatibility we
+ * detect this boundary case and fix it up here.
+ *
+ * In theory this has no behavioural change, but it also works around
+ * a bug elsewhere which causes bgzf_read to return 0 when our offset
+ * is the end of a block rather than the start of the next.
+ */
+void bgzf_idx_amend_last(BGZF *fp, hts_idx_t *hidx, uint64_t offset) {
+    mtaux_t *mt = fp->mt;
+    if (!mt) {
+        hts_idx_amend_last(hidx, offset);
+        return;
+    }
+
+    pthread_mutex_lock(&mt->idx_m);
+    hts_idx_cache_t *ic = &mt->idx_cache;
+    if (ic->nentries > 0) {
+        hts_idx_cache_entry *e = &ic->e[ic->nentries-1];
+        if ((offset & 0xffff) == 0 && e->offset != 0) {
+            // bumped to next block number
+            e->offset = 0;
+            e->block_number++;
+        }
+    }
+    pthread_mutex_unlock(&mt->idx_m);
 }
 
 static int bgzf_idx_flush(BGZF *fp) {
@@ -645,14 +689,15 @@ static int bgzf_uncompress(uint8_t *dst, size_t *dlen,
 static int bgzf_uncompress(uint8_t *dst, size_t *dlen,
                            const uint8_t *src, size_t slen,
                            uint32_t expected_crc) {
-    z_stream zs;
-    zs.zalloc = NULL;
-    zs.zfree = NULL;
-    zs.msg = NULL;
-    zs.next_in = (Bytef*)src;
-    zs.avail_in = slen;
-    zs.next_out = (Bytef*)dst;
-    zs.avail_out = *dlen;
+    z_stream zs = {
+        .zalloc = NULL,
+        .zfree = NULL,
+        .msg = NULL,
+        .next_in = (Bytef*)src,
+        .avail_in = slen,
+        .next_out = (Bytef*)dst,
+        .avail_out = *dlen
+    };
 
     int ret = inflateInit2(&zs, -15);
     if (ret != Z_OK) {
@@ -808,7 +853,7 @@ static int load_block_from_cache(BGZF *fp, int64_t block_address)
     if ( hseek(fp->fp, p->end_offset, SEEK_SET) < 0 )
     {
         // todo: move the error up
-        hts_log_error("Could not hseek to %"PRId64"", p->end_offset);
+        hts_log_error("Could not hseek to %" PRId64, p->end_offset);
         exit(1);
     }
     return p->size;
@@ -971,6 +1016,9 @@ int bgzf_read_block(BGZF *fp)
  single_threaded:
     size = 0;
 
+    int64_t block_address;
+    block_address = bgzf_htell(fp);
+
     // Reading an uncompressed file
     if ( !fp->is_compressed )
     {
@@ -986,14 +1034,12 @@ int bgzf_read_block(BGZF *fp)
             return 0;
         }
         if (fp->block_length != 0) fp->block_offset = 0;
-        fp->block_address += count;
+        fp->block_address = block_address;
         fp->block_length = count;
         return 0;
     }
 
     // Reading compressed file
-    int64_t block_address;
-    block_address = bgzf_htell(fp);
     if ( fp->is_gzip && fp->gz_stream ) // is this is an initialized gzip stream?
     {
         count = inflate_gzip_block(fp);
@@ -1109,7 +1155,21 @@ ssize_t bgzf_read(BGZF *fp, void *data, size_t length)
                 return -1;
             }
             available = fp->block_length - fp->block_offset;
-            if (available <= 0) break;
+            if (available == 0) {
+                if (fp->block_length == 0)
+                    break; // EOF
+
+                // Offset was at end of block (see commit e9863a0)
+                fp->block_address = bgzf_htell(fp);
+                fp->block_offset = fp->block_length = 0;
+                continue;
+            } else if (available < 0) {
+                // Block offset was set to an invalid coordinate
+                hts_log_error("BGZF block offset %d set beyond block size %d",
+                              fp->block_offset, fp->block_length);
+                fp->errcode |= BGZF_ERR_MISUSE;
+                return -1;
+            }
         }
         copy_length = length - bytes_read < available? length - bytes_read : available;
         buffer = (uint8_t*)fp->uncompressed_block;
@@ -1393,8 +1453,13 @@ static int bgzf_check_EOF_common(BGZF *fp)
         if (errno == ESPIPE) { hclearerr(fp->fp); return 2; }
 #ifdef _WIN32
         if (errno == EINVAL) { hclearerr(fp->fp); return 2; }
+#else
+        // Assume that EINVAL was due to the file being less than 28 bytes
+        // long, rather than being a random error return from an hfile backend.
+        // This should be reported as "no EOF block" rather than an error.
+        if (errno == EINVAL) { hclearerr(fp->fp); return 0; }
 #endif
-        else return -1;
+        return -1;
     }
     if ( hread(fp->fp, buf, 28) != 28 ) return -1;
     if ( hseek(fp->fp, offset, SEEK_SET) < 0 ) return -1;
@@ -1407,10 +1472,10 @@ static int bgzf_check_EOF_common(BGZF *fp)
 static void bgzf_mt_eof(BGZF *fp) {
     mtaux_t *mt = fp->mt;
 
-    mt->command = NONE;
     pthread_mutex_lock(&mt->job_pool_m);
     mt->eof = bgzf_check_EOF_common(fp);
     pthread_mutex_unlock(&mt->job_pool_m);
+    mt->command = HAS_EOF_DONE;
     pthread_cond_signal(&mt->command_c);
 }
 
@@ -1426,13 +1491,13 @@ static void bgzf_mt_seek(BGZF *fp) {
 
     hts_tpool_process_reset(mt->out_queue, 0);
     pthread_mutex_lock(&mt->job_pool_m);
-    mt->command = NONE;
     mt->errcode = 0;
 
     if (hseek(fp->fp, mt->block_address, SEEK_SET) < 0)
         mt->errcode = BGZF_ERR_IO;
 
     pthread_mutex_unlock(&mt->job_pool_m);
+    mt->command = SEEK_DONE;
     pthread_cond_signal(&mt->command_c);
 }
 
@@ -1467,12 +1532,17 @@ restart:
         pthread_mutex_lock(&mt->command_m);
         switch (mt->command) {
         case SEEK:
-            bgzf_mt_seek(fp);  // Resets mt->command
+            bgzf_mt_seek(fp);  // Sets mt->command to SEEK_DONE
             pthread_mutex_unlock(&mt->command_m);
             goto restart;
 
         case HAS_EOF:
-            bgzf_mt_eof(fp);   // Resets mt->command
+            bgzf_mt_eof(fp);   // Sets mt->command to HAS_EOF_DONE
+            break;
+
+        case SEEK_DONE:
+        case HAS_EOF_DONE:
+            pthread_cond_signal(&mt->command_c);
             break;
 
         case CLOSE:
@@ -1550,9 +1620,15 @@ restart:
             goto restart;
 
         case HAS_EOF:
-            bgzf_mt_eof(fp);
+            bgzf_mt_eof(fp);   // Sets mt->command to HAS_EOF_DONE
             pthread_mutex_unlock(&mt->command_m);
-            continue;
+            break;
+
+        case SEEK_DONE:
+        case HAS_EOF_DONE:
+            pthread_cond_signal(&mt->command_c);
+            pthread_mutex_unlock(&mt->command_m);
+            break;
 
         case CLOSE:
             pthread_cond_signal(&mt->command_c);
@@ -1798,8 +1874,12 @@ int bgzf_flush_try(BGZF *fp, ssize_t size)
 
 ssize_t bgzf_write(BGZF *fp, const void *data, size_t length)
 {
-    if ( !fp->is_compressed )
+    if ( !fp->is_compressed ) {
+        size_t push = length + (size_t) fp->block_offset;
+        fp->block_offset = push % BGZF_MAX_BLOCK_SIZE;
+        fp->block_address += (push - fp->block_offset);
         return hwrite(fp->fp, data, length);
+    }
 
     const uint8_t *input = (const uint8_t*)data;
     ssize_t remaining = length;
@@ -1821,8 +1901,12 @@ ssize_t bgzf_write(BGZF *fp, const void *data, size_t length)
 
 ssize_t bgzf_block_write(BGZF *fp, const void *data, size_t length)
 {
-    if ( !fp->is_compressed )
+    if ( !fp->is_compressed ) {
+        size_t push = length + (size_t) fp->block_offset;
+        fp->block_offset = push % BGZF_MAX_BLOCK_SIZE;
+        fp->block_address += (push - fp->block_offset);
         return hwrite(fp->fp, data, length);
+    }
 
     const uint8_t *input = (const uint8_t*)data;
     ssize_t remaining = length;
@@ -1913,6 +1997,7 @@ int bgzf_close(BGZF* fp)
 
 void bgzf_set_cache_size(BGZF *fp, int cache_size)
 {
+    if (fp && fp->mt) return; // Not appropriate when multi-threading
     if (fp && fp->cache) fp->cache_size = cache_size;
 }
 
@@ -1921,10 +2006,25 @@ int bgzf_check_EOF(BGZF *fp) {
 
     if (fp->mt) {
         pthread_mutex_lock(&fp->mt->command_m);
+        // fp->mt->command state transitions should be:
+        // NONE -> HAS_EOF -> HAS_EOF_DONE -> NONE
+        // (HAS_EOF -> HAS_EOF_DONE happens in bgzf_mt_reader thread)
         fp->mt->command = HAS_EOF;
         pthread_cond_signal(&fp->mt->command_c);
         hts_tpool_wake_dispatch(fp->mt->out_queue);
-        pthread_cond_wait(&fp->mt->command_c, &fp->mt->command_m);
+        do {
+            pthread_cond_wait(&fp->mt->command_c, &fp->mt->command_m);
+            switch (fp->mt->command) {
+            case HAS_EOF_DONE: break;
+            case HAS_EOF:
+                // Resend signal intended for bgzf_mt_reader()
+                pthread_cond_signal(&fp->mt->command_c);
+                break;
+            default:
+                abort();  // Should not get to any other state
+            }
+        } while (fp->mt->command != HAS_EOF_DONE);
+        fp->mt->command = NONE;
         has_eof = fp->mt->eof;
         pthread_mutex_unlock(&fp->mt->command_m);
     } else {
@@ -1955,11 +2055,26 @@ static inline int64_t bgzf_seek_common(BGZF* fp,
         // know the seek succeeded.
         pthread_mutex_lock(&fp->mt->command_m);
         fp->mt->hit_eof = 0;
+        // fp->mt->command state transitions should be:
+        // NONE -> SEEK -> SEEK_DONE -> NONE
+        // (SEEK -> SEEK_DONE happens in bgzf_mt_reader thread)
         fp->mt->command = SEEK;
         fp->mt->block_address = block_address;
         pthread_cond_signal(&fp->mt->command_c);
         hts_tpool_wake_dispatch(fp->mt->out_queue);
-        pthread_cond_wait(&fp->mt->command_c, &fp->mt->command_m);
+        do {
+            pthread_cond_wait(&fp->mt->command_c, &fp->mt->command_m);
+            switch (fp->mt->command) {
+            case SEEK_DONE: break;
+            case SEEK:
+                // Resend signal intended for bgzf_mt_reader()
+                pthread_cond_signal(&fp->mt->command_c);
+                break;
+            default:
+                abort();  // Should not get to any other state
+            }
+        } while (fp->mt->command != SEEK_DONE);
+        fp->mt->command = NONE;
 
         fp->block_length = 0;  // indicates current block has not been loaded
         fp->block_address = block_address;
@@ -1985,6 +2100,16 @@ int64_t bgzf_seek(BGZF* fp, int64_t pos, int where)
         fp->errcode |= BGZF_ERR_MISUSE;
         return -1;
     }
+
+    // This is a flag to indicate we've jumped elsewhere in the stream, to act
+    // as a hint to any other code which is wrapping up bgzf for its own
+    // purposes.  We may not be able to tell when seek happens as it can be
+    // done on our behalf, eg by the iterator.
+    //
+    // This is never cleared here.  Any tool that needs to handle it is also
+    // responsible for clearing it.
+    fp->seeked = pos;
+
     return bgzf_seek_common(fp, pos >> 16, pos & 0xFFFF);
 }
 
@@ -2274,6 +2399,13 @@ int bgzf_useek(BGZF *fp, off_t uoffset, int where)
     if (fp->is_write || where != SEEK_SET || fp->is_gzip) {
         fp->errcode |= BGZF_ERR_MISUSE;
         return -1;
+    }
+    if (uoffset >= fp->uncompressed_address - fp->block_offset &&
+        uoffset < fp->uncompressed_address + fp->block_length - fp->block_offset) {
+        // Can seek into existing data
+        fp->block_offset += uoffset - fp->uncompressed_address;
+        fp->uncompressed_address = uoffset;
+        return 0;
     }
     if ( !fp->is_compressed )
     {

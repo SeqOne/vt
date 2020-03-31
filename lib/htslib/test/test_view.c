@@ -1,7 +1,7 @@
 /*  test/test_view.c -- simple view tool, purely for use in a test harness.
 
     Copyright (C) 2012 Broad Institute.
-    Copyright (C) 2013-2014 Genome Research Ltd.
+    Copyright (C) 2013-2019 Genome Research Ltd.
 
     Author: Heng Li <lh3@sanger.ac.uk>
 
@@ -35,6 +35,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include "cram/cram.h"
 #include "htslib/sam.h"
 #include "htslib/vcf.h"
+#include "htslib/hts_log.h"
 
 struct opts {
     char *fn_ref;
@@ -61,7 +62,7 @@ enum test_op {
 
 int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, htsFile *out) {
     int r = 0;
-    bam_hdr_t *h = NULL;
+    sam_hdr_t *h = NULL;
     hts_idx_t *idx = NULL;
     bam1_t *b = NULL;
 
@@ -71,7 +72,7 @@ int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
         return EXIT_FAILURE;
     }
     h->ignore_sam_err = opts->ignore_sam_err;
-    if (opts->extra_hdr_nuls) {
+    if (opts->extra_hdr_nuls > 0) {
         char *new_text = realloc(h->text, h->l_text + opts->extra_hdr_nuls);
         if (new_text == NULL) {
             fprintf(stderr, "Error reallocing header text\n");
@@ -89,18 +90,9 @@ int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
     }
 
     /* CRAM output */
-    if (opts->flag & WRITE_CRAM) {
-        int ret;
-
-        // Parse input header and use for CRAM output
-        out->fp.cram->header = sam_hdr_parse_(h->text, h->l_text);
-
+    if ((opts->flag & WRITE_CRAM) && opts->fn_ref) {
         // Create CRAM references arrays
-        if (opts->fn_ref)
-            ret = cram_set_option(out->fp.cram, CRAM_OPT_REFERENCE, opts->fn_ref);
-        else
-            // Attempt to fill out a cram->refs[] array from @SQ headers
-            ret = cram_set_option(out->fp.cram, CRAM_OPT_REFERENCE, NULL);
+        int ret = hts_set_fai_filename(out, opts->fn_ref);
 
         if (ret != 0)
             goto fail;
@@ -188,12 +180,12 @@ int sam_loop(int argc, char **argv, int optind, struct opts *opts, htsFile *in, 
     }
 
     bam_destroy1(b);
-    bam_hdr_destroy(h);
+    sam_hdr_destroy(h);
 
     return 0;
  fail:
     if (b) bam_destroy1(b);
-    if (h) bam_hdr_destroy(h);
+    if (h) sam_hdr_destroy(h);
     if (idx) hts_idx_destroy(idx);
 
     return 1;
@@ -303,7 +295,7 @@ int main(int argc, char *argv[])
     opts.index = NULL;
     opts.min_shift = 0;
 
-    while ((c = getopt(argc, argv, "DSIt:i:bzCul:o:N:BZ:@:Mx:m:p:")) >= 0) {
+    while ((c = getopt(argc, argv, "DSIt:i:bzCul:o:N:BZ:@:Mx:m:p:v")) >= 0) {
         switch (c) {
         case 'D': opts.flag |= READ_CRAM; break;
         case 'S': opts.flag |= READ_COMPRESSED; break;
@@ -324,10 +316,11 @@ int main(int argc, char *argv[])
         case 'x': opts.index = optarg; break;
         case 'm': opts.min_shift = atoi(optarg); break;
         case 'p': out_fn = optarg; break;
+        case 'v': hts_verbose++; break;
         }
     }
     if (argc == optind) {
-        fprintf(stderr, "Usage: test_view [-DSI] [-t fn_ref] [-i option=value] [-bC] [-l level] [-o option=value] [-N num_reads] [-B] [-Z hdr_nuls] [-@ num_threads] [-x index_fn] [-m min_shift] [-p out] <in.bam>|<in.sam>|<in.cram> [region]\n");
+        fprintf(stderr, "Usage: test_view [-DSI] [-t fn_ref] [-i option=value] [-bC] [-l level] [-o option=value] [-N num_reads] [-B] [-Z hdr_nuls] [-@ num_threads] [-x index_fn] [-m min_shift] [-p out] [-v] <in.bam>|<in.sam>|<in.cram> [region]\n");
         fprintf(stderr, "\n");
         fprintf(stderr, "-D: read CRAM format (mode 'c')\n");
         fprintf(stderr, "-S: read compressed BCF, BAM, FAI (mode 'b')\n");
@@ -349,6 +342,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "-x fn: write index to fn\n");
         fprintf(stderr, "-m min_shift: specifies BAI/CSI bin size; 0 is BAI(BAM) or TBI(VCF), 14 is CSI default\n");
         fprintf(stderr, "-p out_fn: output to out_fn instead of stdout\n");
+        fprintf(stderr, "-v: increase verbosity\n");
         fprintf(stderr, "The region list entries should be specified as 'reg:beg-end', with intervals of a region being disjunct and sorted by the starting coordinate.\n");
         return 1;
     }

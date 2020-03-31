@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2015 Genome Research Ltd.
+Copyright (c) 2015, 2018-2019 Genome Research Ltd.
 Author: James Bonfield <jkb@sanger.ac.uk>
 
 Redistribution and use in source and binary forms, with or without
@@ -38,6 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * containers and blocks in a robust manner.
  */
 
+#define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
 #include <config.h>
 
 #include "htslib/hfile.h"
@@ -47,8 +48,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *-----------------------------------------------------------------------------
  * cram_fd
  */
-SAM_hdr *cram_fd_get_header(cram_fd *fd) { return fd->header; }
-void cram_fd_set_header(cram_fd *fd, SAM_hdr *hdr) { fd->header = hdr; }
+sam_hdr_t *cram_fd_get_header(cram_fd *fd) { return fd->header; }
+void cram_fd_set_header(cram_fd *fd, sam_hdr_t *hdr) { fd->header = hdr; }
 
 int cram_fd_get_version(cram_fd *fd) { return fd->version; }
 void cram_fd_set_version(cram_fd *fd, int vers) { fd->version = vers; }
@@ -209,9 +210,12 @@ void cram_block_set_crc32(cram_block *b, int32_t crc) { b->crc32 = crc; }
 void cram_block_set_data(cram_block *b, void *data) { BLOCK_DATA(b) = data; }
 void cram_block_set_size(cram_block *b, int32_t size) { BLOCK_SIZE(b) = size; }
 
-int cram_block_append(cram_block *b, void *data, int size) {
+int cram_block_append(cram_block *b, const void *data, int size) {
     BLOCK_APPEND(b, data, size);
-    return BLOCK_DATA(b) ? 0 : -1; // It'll do for now...
+    return 0;
+
+ block_err:
+    return -1;
 }
 void cram_block_update_size(cram_block *b) { BLOCK_UPLEN(b); }
 

@@ -1,6 +1,6 @@
 /*  faidx.c -- FASTA and FASTQ random access.
 
-    Copyright (C) 2008, 2009, 2013-2018 Genome Research Ltd.
+    Copyright (C) 2008, 2009, 2013-2019 Genome Research Ltd.
     Portions copyright (C) 2011 Broad Institute.
 
     Author: Heng Li <lh3@sanger.ac.uk>
@@ -23,6 +23,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.  */
 
+#define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
 #include <config.h>
 
 #include <ctype.h>
@@ -83,7 +84,7 @@ static inline int fai_insert_index(faidx_t *idx, const char *name, uint64_t len,
     faidx1_t *v = &kh_value(idx->hash, k);
 
     if (! absent) {
-        hts_log_warning("Ignoring duplicate sequence \"%s\" at byte offset %"PRIu64"", name, seq_offset);
+        hts_log_warning("Ignoring duplicate sequence \"%s\" at byte offset %" PRIu64, name, seq_offset);
         free(name_key);
         return 0;
     }
@@ -384,14 +385,14 @@ static faidx_t *fai_read(hFILE *fp, const char *fname, int format)
         }
 
         if (format == FAI_FASTA) {
-            n = sscanf(p, "%"SCNu64"%"SCNu64"%"SCNu32"%"SCNu32"", &len, &seq_offset, &line_blen, &line_len);
+            n = sscanf(p, "%"SCNu64"%"SCNu64"%"SCNu32"%"SCNu32, &len, &seq_offset, &line_blen, &line_len);
 
             if (n != 4) {
                 hts_log_error("Could not understand FASTA index %s line %zd", fname, lnum);
                 goto fail;
             }
         } else {
-            n = sscanf(p, "%"SCNu64"%"SCNu64"%"SCNu32"%"SCNu32"%"SCNu64"", &len, &seq_offset, &line_blen, &line_len, &qual_offset);
+            n = sscanf(p, "%"SCNu64"%"SCNu64"%"SCNu32"%"SCNu32"%"SCNu64, &len, &seq_offset, &line_blen, &line_len, &qual_offset);
 
             if (n != 5) {
                 if (n == 4) {
@@ -693,7 +694,7 @@ faidx_t *fai_load_format(const char *fn, enum fai_format_options format) {
 
 
 static char *fai_retrieve(const faidx_t *fai, const faidx1_t *val,
-                          uint64_t offset, int64_t beg, int64_t end, int *len) {
+                          uint64_t offset, hts_pos_t beg, hts_pos_t end, hts_pos_t *len) {
     char *s;
     size_t l;
     int c = 0;
@@ -739,11 +740,11 @@ static char *fai_retrieve(const faidx_t *fai, const faidx1_t *val,
 }
 
 static int fai_get_val(const faidx_t *fai, const char *str,
-                       int *len, faidx1_t *val, int64_t *fbeg, int64_t *fend) {
+                       hts_pos_t *len, faidx1_t *val, hts_pos_t *fbeg, hts_pos_t *fend) {
     khiter_t iter;
     khash_t(s) *h;
     int id;
-    int64_t beg, end;
+    hts_pos_t beg, end;
 
     if (!fai_parse_region(fai, str, &id, &beg, &end, 0)) {
         hts_log_warning("Reference %s not found in FASTA file, returning empty sequence", str);
@@ -753,11 +754,9 @@ static int fai_get_val(const faidx_t *fai, const char *str,
 
     h = fai->hash;
     iter = kh_get(s, h, faidx_iseq(fai, id));
-    if (!iter) {
+    if (iter >= kh_end(h)) {
         // should have already been caught above
         abort();
-        *len = -2;
-        return 1;
     }
     *val = kh_value(h, iter);
 
@@ -772,7 +771,7 @@ static int fai_get_val(const faidx_t *fai, const char *str,
 }
 
 
-char *fai_fetch(const faidx_t *fai, const char *str, int *len)
+char *fai_fetch64(const faidx_t *fai, const char *str, hts_pos_t *len)
 {
     faidx1_t val;
     int64_t beg, end;
@@ -785,8 +784,15 @@ char *fai_fetch(const faidx_t *fai, const char *str, int *len)
     return fai_retrieve(fai, &val, val.seq_offset, beg, end, len);
 }
 
+char *fai_fetch(const faidx_t *fai, const char *str, int *len)
+{
+    hts_pos_t len64;
+    char *ret = fai_fetch64(fai, str, &len64);
+    *len = len64; // trunc
+    return ret;
+}
 
-char *fai_fetchqual(const faidx_t *fai, const char *str, int *len) {
+char *fai_fetchqual64(const faidx_t *fai, const char *str, hts_pos_t *len) {
     faidx1_t val;
     int64_t beg, end;
 
@@ -798,6 +804,12 @@ char *fai_fetchqual(const faidx_t *fai, const char *str, int *len) {
     return fai_retrieve(fai, &val, val.qual_offset, beg, end, len);
 }
 
+char *fai_fetchqual(const faidx_t *fai, const char *str, int *len) {
+    hts_pos_t len64;
+    char *ret = fai_fetchqual64(fai, str, &len64);
+    *len = len64; // trunc
+    return ret;
+}
 
 int faidx_fetch_nseq(const faidx_t *fai)
 {
@@ -821,8 +833,7 @@ int faidx_seq_len(const faidx_t *fai, const char *seq)
     return kh_val(fai->hash, k).len;
 }
 
-
-static int faidx_adjust_position(const faidx_t *fai, faidx1_t *val, const char *c_name, int *p_beg_i, int *p_end_i, int *len) {
+static int faidx_adjust_position(const faidx_t *fai, faidx1_t *val, const char *c_name, hts_pos_t *p_beg_i, hts_pos_t *p_end_i, hts_pos_t *len) {
     khiter_t iter;
 
     // Adjust position
@@ -852,22 +863,28 @@ static int faidx_adjust_position(const faidx_t *fai, faidx1_t *val, const char *
     return 0;
 }
 
+char *faidx_fetch_seq64(const faidx_t *fai, const char *c_name, hts_pos_t p_beg_i, hts_pos_t p_end_i, hts_pos_t *len)
+{
+    faidx1_t val;
+
+    // Adjust position
+    if (faidx_adjust_position(fai, &val, c_name, &p_beg_i, &p_end_i, len)) {
+        return NULL;
+    }
+
+    // Now retrieve the sequence
+    return fai_retrieve(fai, &val, val.seq_offset, p_beg_i, p_end_i + 1, len);
+}
 
 char *faidx_fetch_seq(const faidx_t *fai, const char *c_name, int p_beg_i, int p_end_i, int *len)
 {
-    faidx1_t val;
-
-    // Adjust position
-    if (faidx_adjust_position(fai, &val, c_name, &p_beg_i, &p_end_i, len)) {
-        return NULL;
-    }
-
-    // Now retrieve the sequence
-    return fai_retrieve(fai, &val, val.seq_offset, p_beg_i, (long) p_end_i + 1, len);
+    hts_pos_t len64;
+    char *ret = faidx_fetch_seq64(fai, c_name, p_beg_i, p_end_i, &len64);
+    *len = len64;  // trunc
+    return ret;
 }
 
-
-char *faidx_fetch_qual(const faidx_t *fai, const char *c_name, int p_beg_i, int p_end_i, int *len)
+char *faidx_fetch_qual64(const faidx_t *fai, const char *c_name, hts_pos_t p_beg_i, hts_pos_t p_end_i, hts_pos_t *len)
 {
     faidx1_t val;
 
@@ -877,9 +894,16 @@ char *faidx_fetch_qual(const faidx_t *fai, const char *c_name, int p_beg_i, int 
     }
 
     // Now retrieve the sequence
-    return fai_retrieve(fai, &val, val.qual_offset, p_beg_i, (long) p_end_i + 1, len);
+    return fai_retrieve(fai, &val, val.qual_offset, p_beg_i, p_end_i + 1, len);
 }
 
+char *faidx_fetch_qual(const faidx_t *fai, const char *c_name, int p_beg_i, int p_end_i, int *len)
+{
+    hts_pos_t len64;
+    char *ret = faidx_fetch_qual64(fai, c_name, p_beg_i, p_end_i, &len64);
+    *len = len64;  // trunc
+    return ret;
+}
 
 int faidx_has_seq(const faidx_t *fai, const char *seq)
 {
@@ -889,7 +913,43 @@ int faidx_has_seq(const faidx_t *fai, const char *seq)
 }
 
 const char *fai_parse_region(const faidx_t *fai, const char *s,
-                             int *tid, int64_t *beg, int64_t *end, int flags)
+                             int *tid, hts_pos_t *beg, hts_pos_t *end,
+                             int flags)
 {
     return hts_parse_region(s, tid, beg, end, (hts_name2id_f)fai_name2id, (void *)fai, flags);
+}
+
+void fai_set_cache_size(faidx_t *fai, int cache_size) {
+    bgzf_set_cache_size(fai->bgzf, cache_size);
+}
+
+char *fai_path(const char *fa) {
+    char *fai = NULL;
+    if (!fa) {
+        hts_log_error("No reference file specified");
+    } else {
+        char *fai_tmp = strstr(fa, HTS_IDX_DELIM);
+        if (fai_tmp) {
+            fai_tmp += strlen(HTS_IDX_DELIM);
+            fai = strdup(fai_tmp);
+            if (!fai)
+                hts_log_error("Failed to allocate memory");
+        } else {
+            if (hisremote(fa)) {
+                fai = hts_idx_locatefn(fa, ".fai");       // get the remote fai file name, if any, but do not download the file
+                if (!fai)
+                    hts_log_error("Failed to locate index file for remote reference file '%s'", fa);
+            } else{
+                if (hts_idx_check_local(fa, HTS_FMT_FAI, &fai) == 0 && fai) {
+                    if (fai_build3(fa, fai, NULL) == -1) {      // create local fai file by indexing local fasta
+                        hts_log_error("Failed to build index file for reference file '%s'", fa);
+                        free(fai);
+                        fai = NULL;
+                    }
+                }
+            }
+        }
+    }
+
+    return fai;
 }

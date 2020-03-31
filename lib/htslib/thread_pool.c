@@ -1,6 +1,6 @@
 /*  thread_pool.c -- A pool of generic worker threads
 
-    Copyright (c) 2013-2017 Genome Research Ltd.
+    Copyright (c) 2013-2019 Genome Research Ltd.
 
     Author: James Bonfield <jkb@sanger.ac.uk>
 
@@ -23,6 +23,7 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.  */
 
 #ifndef TEST_MAIN
+#define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
 #include <config.h>
 #endif
 
@@ -56,10 +57,11 @@ static int worker_id(hts_tpool *p) {
     return -1;
 }
 
-int DBG_OUT(FILE *fp, char *fmt, ...) {
+void DBG_OUT(FILE *fp, char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    return vfprintf(fp, fmt, args);
+    vfprintf(fp, fmt, args);
+    va_end(args);
 }
 #else
 #define DBG_OUT(...) do{}while(0)
@@ -99,8 +101,11 @@ static int hts_tpool_add_result(hts_tpool_job *j, void *data) {
         return 0;
     }
 
-    if (!(r = malloc(sizeof(*r))))
+    if (!(r = malloc(sizeof(*r)))) {
+        pthread_mutex_unlock(&q->p->pool_m);
+        hts_tpool_process_shutdown(q);
         return -1;
+    }
 
     r->next = NULL;
     r->data = data;
@@ -581,7 +586,8 @@ static void *tpool_worker(void *arg) {
             DBG_OUT(stderr, "%d: Processing queue %p, serial %"PRId64"\n",
                     worker_id(j->p), q, j->serial);
 
-            hts_tpool_add_result(j, j->func(j->arg));
+            if (hts_tpool_add_result(j, j->func(j->arg)) < 0)
+                goto err;
             //memset(j, 0xbb, sizeof(*j));
             free(j);
 
@@ -603,9 +609,16 @@ static void *tpool_worker(void *arg) {
     fprintf(stderr, "%d: Shutting down\n", worker_id(p));
 #endif
     return NULL;
+
+ err:
+#ifdef DEBUG
+    fprintf(stderr, "%d: Failed to add result\n", worker_id(p));
+#endif
+    return NULL;
 }
 
 static void wake_next_worker(hts_tpool_process *q, int locked) {
+    if (!q) return;
     hts_tpool *p = q->p;
     if (!locked)
         pthread_mutex_lock(&p->pool_m);
@@ -630,7 +643,7 @@ static void wake_next_worker(hts_tpool_process *q, int locked) {
 
     int running = p->tsize - p->nwaiting;
     int sig = p->t_stack_top >= 0 && p->njobs > p->tsize - p->nwaiting
-        && (!q || q->n_processing < q->qsize - q->n_output);
+        && (q->n_processing < q->qsize - q->n_output);
 
 //#define AVG_USAGE
 #ifdef AVG_USAGE

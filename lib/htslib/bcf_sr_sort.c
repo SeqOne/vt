@@ -1,5 +1,5 @@
 /*
-    Copyright (C) 2017 Genome Research Ltd.
+    Copyright (C) 2017-2019 Genome Research Ltd.
 
     Author: Petr Danecek <pd3@sanger.ac.uk>
 
@@ -22,6 +22,7 @@
     THE SOFTWARE.
 */
 
+#define HTS_BUILDING_LIBRARY // Enables HTSLIB_EXPORT, see htslib/hts_defs.h
 #include <config.h>
 
 #include <strings.h>
@@ -288,7 +289,7 @@ void debug_vbuf(sr_sort_t *srt)
         for (i=0; i<srt->sr->nreaders; i++)
         {
             vcf_buf_t *buf = &srt->vcf_buf[i];
-            fprintf(stderr,"\t%d", buf->rec[j] ? buf->rec[j]->pos+1 : 0);
+            fprintf(stderr,"\t%"PRIhts_pos, buf->rec[j] ? buf->rec[j]->pos+1 : 0);
         }
         fprintf(stderr,"\n");
     }
@@ -330,7 +331,7 @@ int bcf_sr_sort_add_active(sr_sort_t *srt, int idx)
     srt->active[srt->nactive - 1] = idx;
     return 0; // FIXME: check for errs in this function
 }
-static int bcf_sr_sort_set(bcf_srs_t *readers, sr_sort_t *srt, const char *chr, int min_pos)
+static int bcf_sr_sort_set(bcf_srs_t *readers, sr_sort_t *srt, const char *chr, hts_pos_t min_pos)
 {
     if ( !srt->grp_str2int )
     {
@@ -556,7 +557,7 @@ static int bcf_sr_sort_set(bcf_srs_t *readers, sr_sort_t *srt, const char *chr, 
     return 0;  // FIXME: check for errs in this function
 }
 
-int bcf_sr_sort_next(bcf_srs_t *readers, sr_sort_t *srt, const char *chr, int min_pos)
+int bcf_sr_sort_next(bcf_srs_t *readers, sr_sort_t *srt, const char *chr, hts_pos_t min_pos)
 {
     int i,j;
     assert( srt->nactive>0 );

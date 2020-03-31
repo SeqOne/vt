@@ -1,4 +1,4 @@
-#    Copyright (C) 2017 Genome Research Ltd.
+#    Copyright (C) 2017-2018 Genome Research Ltd.
 #
 #    Author: Robert Davies <rmd@sanger.ac.uk>
 #
@@ -69,3 +69,5 @@ P c1#pad2.out $pileup -m c1#pad2.sam
 P c1#pad3.out $pileup c1#pad3.sam
 P c1#pad3.out $pileup -m c1#pad3.sam
 
+# Issue #852.  Problem caused by alignments with entirely S/I ops in CIGAR.
+P small.out $pileup -m small.bam

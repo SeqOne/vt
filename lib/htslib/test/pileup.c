@@ -1,6 +1,6 @@
 /*  test/pileup.c -- simple pileup tester
 
-    Copyright (C) 2014,2018 Genome Research Ltd.
+    Copyright (C) 2014,2018-2019 Genome Research Ltd.
 
     Author: James Bonfield <jkb@sanger.ac.uk>
 
@@ -55,7 +55,7 @@ samtools mpileup -B -Q 0 in.bam | perl -lane \
 typedef struct ptest_t {
     const char *fname;
     samFile *fp;
-    bam_hdr_t *fp_hdr;
+    sam_hdr_t *fp_hdr;
 } ptest_t;
 
 static int readaln(void *data, bam1_t *b) {
@@ -168,6 +168,11 @@ static int test_mpileup(ptest_t *input) {
         perror("bam_plp_init");
         goto fail;
     }
+    if (bam_mplp_init_overlaps(iter) < 0) {
+        perror("bam_mplp_init_overlaps");
+        goto fail;
+    }
+
     while ((n = bam_mplp_auto(iter, &tid, &pos, n_plp, pileups)) > 0) {
         if (tid < 0) break;
         if (tid >= input->fp_hdr->n_targets) {
@@ -238,13 +243,13 @@ int main(int argc, char **argv) {
             goto fail;
     }
 
-    bam_hdr_destroy(g.fp_hdr);
+    sam_hdr_destroy(g.fp_hdr);
     sam_close(g.fp);
 
     return EXIT_SUCCESS;
 
  fail:
-    if (g.fp_hdr) bam_hdr_destroy(g.fp_hdr);
+    if (g.fp_hdr) sam_hdr_destroy(g.fp_hdr);
     if (g.fp) sam_close(g.fp);
     return EXIT_FAILURE;
 }

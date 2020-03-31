@@ -30,7 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 /*
-Copyright (c) 2003-2013 Genome Research Ltd.
+Copyright (c) 2003-2013, 2018-2019 Genome Research Ltd.
 
 Author: James Bonfield <jkb@sanger.ac.uk>
 
@@ -60,8 +60,8 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef _misc_h
-#define _misc_h
+#ifndef CRAM_MISC_H
+#define CRAM_MISC_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,4 +74,4 @@ extern "C" {
 }
 #endif
 
-#endif /*_misc_h*/
+#endif /* CRAM_MISC_H */
